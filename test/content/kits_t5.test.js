@@ -127,6 +127,78 @@ test('缇缇 T2 勇气的报偿: Sargon/Minos ops above 50 % HP get +20 ASPD', (
 });
 
 // ------------------------------------------------------------------------------------------------------------------
+for (const [id, label] of [['chess_char_5_03_a', '普通'], ['chess_char_5_03_b', '精锐']]) {
+  for (const dir of ['RIGHT', 'LEFT']) {
+    test(`烛煌 S3（${label}、${dir}）：敌人只在技能范围内时自动开启`, () => {
+      const col = dir === 'RIGHT' ? 3 : 8;
+      const forward = dir === 'RIGHT' ? 1 : -1;
+      const h = makeBattle({
+        defs: { enemies: { enemy_dummy: dummy() } },
+        units: [{ chessId: id, row: 10, col, dir, ...(dir === 'LEFT' ? { skillIndex: 2 } : {}) }],
+        hooks: ['skillStart', 'attack', 'damaged'], captureNoisy: true, autoFinish: false,
+      });
+      const u = h.unit(id);
+      h.run(0.2);
+      assert.equal(u.skill.id, 'skchr_blaze2_3');
+      u.skill.gainSp(1000);
+      h.spawn('enemy_dummy', { pos: [10, col + 5 * forward] });
+      h.run(0.3);
+      assert.ok(u.skill.ready);
+      assert.equal(u.skill.activations, 0, '技能范围外的敌人不触发');
+
+      // 前方第四格属于三技能范围，但不属于普通攻击范围。
+      const e = h.spawn('enemy_dummy', { pos: [10, col + 4 * forward] });
+      assert.ok(absKeysHas(u.def.skill.rangeGrid, u, 10, col + 4 * forward));
+      assert.equal(h.b.enemiesInKeys(u.baseRangeKeys, u, u.profile).length, 0);
+      assert.equal(h.hooksOf('attack').filter((c) => c.attacker === u).length, 0);
+      assert.ok(h.runUntil(() => u.skill.active, 0.2), '无需等待普通攻击即可开启');
+      assert.equal(u.skill.activations, 1);
+      assert.equal(h.hooksOf('skillStart').find((c) => c.unit === u).reason, 'SKILL_RANGE');
+      assert.ok(h.runUntil(() => h.hooksOf('damaged').some((c) => c.source === u && c.target === e && c.dmg.isSkill), 3), '开启后能攻击扩展范围内的敌人');
+      clean(h);
+    });
+  }
+}
+
+test('烛煌 S3：技能范围触发仍受技力、自动操作冷却和沉默限制', () => {
+  const h = makeBattle({
+    defs: { enemies: { enemy_dummy: dummy() } },
+    units: [{ chessId: 'chess_char_5_03_a', row: 10, col: 3 }],
+    enemies: [{ key: 'enemy_dummy', pos: [10, 7] }],
+    flags: { startOpCooldown: 3 }, autoFinish: false,
+  });
+  const u = h.unit('chess_char_5_03_a');
+  h.run(0.5);
+  assert.equal(u.skill.ready, false);
+  assert.equal(u.skill.activations, 0, '技力不足时不开启');
+  u.skill.gainSp(1000);
+  h.run(1);
+  assert.ok(u.skill.ready);
+  assert.ok(u.skill.opCooling);
+  assert.equal(u.skill.activations, 0, '自动操作冷却期间不开启');
+  h.b.addBuff(u, { key: 'test:blazeSilence', flags: { silence: true } });
+  h.run(2);
+  assert.equal(u.skill.opCooling, false);
+  assert.equal(u.skill.activations, 0, '沉默期间不开启');
+  h.b.removeBuff(u, 'test:blazeSilence');
+  h.step(2);
+  assert.ok(u.skill.active);
+  assert.equal(u.skill.activations, 1);
+  clean(h);
+});
+
+test('烛煌 S1/S2：原有自动释放策略保持不变', () => {
+  for (const id of ['chess_char_5_03_a', 'chess_char_5_03_b']) {
+    for (const skillIndex of [0, 1]) {
+      const h = makeBattle({ units: [{ chessId: id, row: 10, col: 3, skillIndex }], autoFinish: false });
+      const u = h.unit(id);
+      assert.equal(u.skill.id, `skchr_blaze2_${skillIndex + 1}`);
+      assert.equal(u.skill.rule, 'DEFAULT');
+      clean(h);
+    }
+  }
+});
+
 test('烛煌 S3: its target and the enemies within the 1.7 splash, BAT −1.3 s, burn bursts refill ammo; T1 熔点引爆 350 % + heal; T2 downed → revive', () => {
   const h = makeBattle({
     defs: { enemies: { enemy_dummy: dummy() } },
@@ -142,13 +214,16 @@ test('烛煌 S3: its target and the enemies within the 1.7 splash, BAT −1.3 s,
   assert.ok(h.runUntil(() => u.skill.active, 10));
   approx(u.s.atk, atk0 * (1 + bb.atk));
   approx(u.s.interval, u.base.bat + bb.base_attack_time, 1e-6, 'BAT 1.6 − 1.3 s');
-  h.run(1);
-  const hitIds = new Set(h.hooksOf('damaged').filter((c) => c.source === u && c.dmg.isSkill && c.dmg.isAttack).map((c) => c.target.id));
-  assert.equal(hitIds.size, 3, 'group attack: the three stand within 1.7 of each other (PRTS 备注 "攻击溅射半径1.7")');
+  // 自动开启可早于下一次普攻；按真实命中事件验证群体攻击。
+  const hitIds = () => new Set(h.hooksOf('damaged').filter((c) => c.source === u && c.dmg.isSkill && c.dmg.isAttack).map((c) => c.target.id));
+  assert.ok(h.runUntil(() => hitIds().size === 3, 3), '三技能命中范围内的三个敌人');
+  assert.ok(h.runUntil(() => h.hooksOf('ammoUsed').length >= bb.ammo_recover, 3));
+  const ammoBefore = u.skill.ammoLeft;
   // a burn burst anywhere: +ammo, 熔点引爆 elemental damage and heal
   const e = h.b.enemies[0];
   u.hp = 100;
   h.b.dealDamage(null, e, { type: 'element', element: 'burn', amount: 1000 });
+  assert.equal(u.skill.ammoLeft - ammoBefore, bb.ammo_recover);
   const melt = tagged(h, 'blazeMelt', e);
   assert.equal(melt.length, 1);
   approx(melt[0].amount, u.s.atk * t0.ep_damage_scale, 1e-6, 'meltdown');

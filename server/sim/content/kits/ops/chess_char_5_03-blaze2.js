@@ -15,7 +15,8 @@ const BLAZE_S3_SPLASH = 1.7;
 
 export default {
   // ---------------------------------------------------------------------------------------------------------------
-  // 烛煌 — S3 众恶的焚场 (ammo): skill range 4-11 (the targets; the DEFAULT cast still needs an enemy in 3-1), ATK +,
+  // 烛煌 S3 众恶的焚场：自建分支按 4-11 技能范围自动开启；原始数据仍为官方 DEFAULT，S1/S2 保持官方策略。
+  // S3 (ammo): ATK +,
   // BAT −1.3 s, "攻击变为群体攻击" = one target + a BLAZE_S3_SPLASH (1.7) splash around it (PRTS 备注 "攻击溅射半径1.7",
   // 中点判定 — so the fire reaches past the diamond; it used to hit every enemy inside it instead, community report E1
   // after 0.1.0), +attack@atk_scale ATK elemental damage to every enemy of the attack in a burn burst (main and splash),
@@ -85,6 +86,7 @@ export default {
       }),
       skill: {
         kind: 'ammo', ammo: num(bb['attack@trigger_time'], 18),
+        trigger: { rule: 'SKILL_RANGE', grid: skillGrid(chess, def) },
         mods: mods({ atkPct: num(bb.atk), batPct: batPct(bb.base_attack_time, chess) }),
         targeting: skillGrid(chess, def) ? { rangeGrid: skillGrid(chess, def) } : undefined,
         attack: {
