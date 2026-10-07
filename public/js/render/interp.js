@@ -30,6 +30,7 @@
 //     both are integers): downAt(time) returns the list of the snapshot at `time`.
 // Game times in both (`cooldownEnd`, `respawnAt`) are on the snapshots' clock, so a view compares them with renderT.
 // `stand` [[id, until]]：敌人普攻后摇结束的游戏时间。只调整位置插值，不从 anim 推断停步；旧快照仍线性插值。
+// `standCut` [[id, at]]：最近一次终止或忽略后摇的游戏时间；包含打断的区间保持原有线性插值。
 
 import { fxForm } from '../../../shared/protocol.js';
 import { ANIM } from '../../../shared/constants.js';
@@ -43,6 +44,12 @@ const ELEMENT_KEYS = new Set(['neural', 'erosion', 'burn', 'apoptosis', 'necrosi
 const MAX_EVENTS = 6000;
 const finite = (v, d = 0) => (typeof v === 'number' && Number.isFinite(v) ? v : d);
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+
+/** 插值与外推共用移动区间；新帧确认打断时不能沿用旧的后摇结束时间。 */
+function movementStart(a, b, id) {
+  const until = a.stand?.get(id), cutAt = b.standCut?.get(id);
+  return until > a.t && until <= b.t && !(cutAt >= a.t && cutAt <= b.t) ? until : a.t;
+}
 
 /** Cosmetic event kinds that may be dropped when far behind (never state-changing). */
 export const COSMETIC_EVENTS = new Set(['atk', 'dmg', 'heal', 'fx', 'layer', 'bounty']);
@@ -67,9 +74,10 @@ export function frameTime(msg) {
 
 /**
  * Validate & normalise a b.snap payload. Returns `{ t, units: Map<id, tuple>, down: [[id, respawnAt, respawnTime,
- * state, row?, col?]] | null, stand: Map<id, until> | null, raw }` or null when unusable. Tuples with a non-finite id/x/y are skipped; other numbers default
+ * state, row?, col?]] | null, stand: Map<id, until> | null, standCut: Map<id, at> | null, raw }` or null when unusable. Tuples with a non-finite id/x/y are skipped; other numbers default
  * to 0; a unit's `elem` entry (see header) is appended to its tuple; malformed `elem` / `down` entries are dropped.
  * `stand` 只保留快照中已有单位的有限、未来结束时间。
+ * `standCut` 只保留快照中已有单位的有限、非负且不晚于快照的时间。
  */
 export function normalizeSnapshot(snap) {
   if (!snap || typeof snap !== 'object') return null;
@@ -108,7 +116,14 @@ export function normalizeSnapshot(snap) {
       (stand || (stand = new Map())).set(e[0], e[1]);
     }
   }
-  return { t, units, down, stand, raw: snap };
+  let standCut = null;
+  if (Array.isArray(snap.standCut)) {
+    for (const e of snap.standCut) {
+      if (!Array.isArray(e) || !units.has(e[0]) || !Number.isFinite(e[1]) || e[1] < 0 || e[1] > t) continue;
+      (standCut || (standCut = new Map())).set(e[0], e[1]);
+    }
+  }
+  return { t, units, down, stand, standCut, raw: snap };
 }
 
 export class SnapshotBuffer {
@@ -297,9 +312,7 @@ export class SnapshotBuffer {
         const dx = b[1] - a[1], dy = b[2] - a[2];
         // (a deployment in between — the newer snapshot starts its deploy animation — lands on its tile, no slide)
         const tele = dx * dx + dy * dy > this.teleport * this.teleport || redeployed(a, b);
-        const until = A.stand?.get(id);
-        // 后摇在两帧之间结束：先停步，再插值实际移动部分。若新帧在结束前已经移动（如失衡打断），沿用线性插值。
-        const start = until > A.t && until <= B.t ? until : A.t;
+        const start = movementStart(A, B, id);
         const moveSpan = B.t - start;
         const moveAlpha = moveSpan > 0 ? clamp((time - start) / moveSpan, 0, 1) : 0;
         o.x = tele ? (alpha < 1 ? a[1] : b[1]) : a[1] + dx * moveAlpha;
@@ -316,9 +329,12 @@ export class SnapshotBuffer {
         if (P && ext > 0 && !A.stand?.has(id)) {
           const p = P.units.get(id);
           const dtp = A.t - P.t;
-          if (p && dtp > 0) {
-            vx = (a[1] - p[1]) / dtp; vy = (a[2] - p[2]) / dtp;
-            if (vx * vx + vy * vy > (this.teleport / dtp) ** 2 || redeployed(p, a)) { vx = 0; vy = 0; }
+          const moveSpan = A.t - movementStart(P, A, id);
+          if (p && dtp > 0 && moveSpan > 0) {
+            const dx = a[1] - p[1], dy = a[2] - p[2];
+            if (dx * dx + dy * dy <= this.teleport * this.teleport && !redeployed(p, a)) {
+              vx = dx / moveSpan; vy = dy / moveSpan;
+            }
           }
         }
         o.x = a[1] + vx * ext;

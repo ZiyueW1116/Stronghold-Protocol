@@ -32,6 +32,13 @@ export class BattleEvents {
     return ev;
   }
 
+  /** 记录后摇被终止或忽略的游戏时间；仅用于显示，不改动攻击计时或状态。 */
+  _cutAttackStand(unit) {
+    if (unit.side === 'enemy' && Number.isFinite(unit.atkStandUntil) && unit.atkStandUntil > this.time) {
+      unit.atkStandCutAt = this.time;
+    }
+  }
+
   /**
    * Compact full snapshot of this field (DESIGN §8.2 b.snap), plus (only when non-empty):
    *   down: [[id, respawnAt, respawnTime, state, row, col]] — operators that left the field waiting to redeploy (isDown): the
@@ -39,6 +46,7 @@ export class BattleEvents {
    *         come back on: _layBody — where they fell, or their home);
    *   elem: [[id, element, fill, cooldownEnd, cooldown]] — the element gauge each unit shows (damage.js elementView).
    *   stand: [[id, until]] — 敌人普攻后摇结束的游戏时间，读取现有 atkStandUntil，不改变战斗状态。
+   *   standCut: [[id, at]] — 最近一次终止或忽略后摇的游戏时间，跨帧打断时不沿用旧的停步区间。
    */
   snapshot() {
     const snap = {
@@ -61,18 +69,23 @@ export class BattleEvents {
       (down || (down = [])).push([u.id, r2(u.respawnAt), r2(Math.max(0, u.respawnAt - u.deathAt)), this._downState(u), ...this.restTile(u)]);
     }
     if (down) snap.down = down;
-    let elem = null, stand = null;
+    let elem = null, stand = null, standCut = null;
     for (const u of this.units) {
       if (!u.alive || !u.deployed || u.hidden) continue;
       const until = Math.round(u.atkStandUntil * 1000) / 1000;
       if (u.side === 'enemy' && !u.s.flags.fear && !u.s.flags.stun && Number.isFinite(until) && until > snap.t) {
         (stand || (stand = [])).push([u.id, until]);
       }
+      const cutAt = Math.round(u.atkStandCutAt * 1000) / 1000;
+      if (u.side === 'enemy' && Number.isFinite(cutAt) && cutAt >= 0 && cutAt <= snap.t) {
+        (standCut || (standCut = [])).push([u.id, cutAt]);
+      }
       const v = elementView(u, this.time);
       if (v) (elem || (elem = [])).push([u.id, v[0], v[1], v[2], v[3]]);
     }
     if (elem) snap.elem = elem;
     if (stand) snap.stand = stand;
+    if (standCut) snap.standCut = standCut;
     return snap;
   }
 

@@ -5,6 +5,7 @@ import { SnapshotBuffer, normalizeSnapshot } from '../../public/js/render/interp
 import { ANIM } from '../../shared/constants.js';
 import { makeBattle, chessRec, checkInvariants } from '../helpers/battleHarness.js';
 import { snapFrame } from '../../server/match/fields.js';
+import { TICK } from '../../server/sim/constants.js';
 
 const tuple = (x, anim = ANIM.ATTACK) => [1, x, 9, 100, 100, 0, 0, 0, anim];
 const frame = (t, x, until, anim) => ({ t, units: [tuple(x, anim)], ...(until === undefined ? {} : { stand: [[1, until]] }) });
@@ -18,6 +19,17 @@ test('stand：仅保留快照中存在的单位与有限、未来的结束时间
   for (const stand of [undefined, null, {}, [], [[1, 1]], [[2, 2]]]) {
     assert.equal(normalizeSnapshot({ t: 1, units: [tuple(0)], stand }).stand, null);
   }
+});
+
+test('standCut：仅保留已有单位的有限、非负且不晚于快照的时间', () => {
+  const valid = normalizeSnapshot({ t: 'b.snap', gt: 1, units: [tuple(0)], standCut: [
+    null, 'x', [1], [2, 0.9], [1, '0.9'], [1, NaN], [1, Infinity], [1, -1], [1, 1.01], [1, 0.9],
+  ] });
+  assert.deepEqual([...valid.standCut], [[1, 0.9]]);
+  for (const standCut of [undefined, null, {}, [], [[1, -1]], [[2, 0]], [[1, 1.01]]]) {
+    assert.equal(normalizeSnapshot({ t: 1, units: [tuple(0)], standCut }).standCut, null);
+  }
+  assert.equal(normalizeSnapshot({ t: 1, units: [tuple(0)], standCut: [[1, 0], [1, 1]] }).standCut.get(1), 1);
 });
 
 test('后摇结束前保持位置，结束后插值剩余区间；HP/SP 仍按整段时间插值', () => {
@@ -66,6 +78,41 @@ test('后摇尚未到期但新帧已移动时，不阻止权威位置更新', ()
   near(b.sample(1.05).get(1).x, 0.05);
 });
 
+test('后摇结束时间落在两帧之间，但该区间有打断时，插值和外推均使用完整区间', () => {
+  for (const cutAt of [1, 1.04, 1.1]) {
+    const b = new SnapshotBuffer();
+    b.push(frame(1, 0, 1.08), 0);
+    b.push({ ...frame(1.1, 0.1, undefined, ANIM.MOVE), standCut: [[1, cutAt]] }, 0.05);
+    near(b.sample(1.05).get(1).x, 0.05);
+    near(b.sample(1.099).get(1).vx, 1);
+    near(b.sample(1.101).get(1).vx, 1);
+    near(b.sample(1.15).get(1).x, 0.15);
+  }
+});
+
+test('旧的打断记录不影响后续未被打断的后摇', () => {
+  const b = new SnapshotBuffer();
+  b.push(frame(1, 0, 1.08), 0);
+  b.push({ ...frame(1.1, 0.02), standCut: [[1, 0.9]] }, 0.05);
+  assert.equal(b.sample(1.04).get(1).x, 0);
+  near(b.sample(1.09).get(1).vx, 1);
+  near(b.sample(1.15).get(1).vx, 1);
+});
+
+test('后摇恢复段进入外推时速度连续，零长度移动区间不产生无穷速度', () => {
+  const b = new SnapshotBuffer();
+  b.push(frame(1, 0, 1.08), 0);
+  b.push(frame(1.1, 0.02, undefined, ANIM.MOVE), 0.05);
+  near(b.sample(1.099).get(1).vx, 1);
+  near(b.sample(1.101).get(1).vx, 1);
+  near(b.sample(1.15).get(1).x, 0.07);
+  const edge = new SnapshotBuffer();
+  edge.push(frame(1, 0, 1.1), 0);
+  edge.push(frame(1.1, 0.02), 0.05);
+  near(edge.sample(1.15).get(1).x, 0.02);
+  assert.equal(edge.sample(1.15).get(1).vx, 0);
+});
+
 test('停步期间及网络停顿越过结束时间后，都不使用攻击前的速度外推', () => {
   const b = new SnapshotBuffer({ maxExtrapolate: 0.2 });
   b.push(frame(0.9, -0.1), 0);
@@ -87,6 +134,8 @@ test('瞬移与重新部署的跳转优先于后摇插值', () => {
     assert.equal(b.sample(1.09).get(1).x, 0);
     near(b.sample(1.1).get(1).x, x);
     assert.equal(b.sample(1.09).get(1).vx, 0);
+    near(b.sample(1.15).get(1).x, x);
+    assert.equal(b.sample(1.15).get(1).vx, 0);
   }
 });
 
@@ -124,6 +173,59 @@ test('真实隐形弩手：Battle → b.snap → SnapshotBuffer 在后摇结束�
   const moved = b.sample((until + B.t) / 2).get(a[0]);
   near(moved.x, (a[1] + z[1]) / 2);
   near(moved.y, (a[2] + z[2]) / 2);
+  near(b.sample(B.t - 1e-6).get(a[0]).vx, b.sample(B.t + 1e-6).get(a[0]).vx);
+  checkInvariants(h.b);
+  assert.equal(h.b.errors.length, 0);
+});
+
+test('真实隐形弩手：失衡跨帧打断时不按旧后摇时间冻结和集中追赶', () => {
+  const h = arena('enemy_1019_jshoot');
+  assert.ok(h.runUntil(() => {
+    const e = h.enemy('enemy_1019_jshoot');
+    return e && e.atkStandUntil - h.b.time > TICK && e.atkStandUntil - h.b.time < 3 * TICK;
+  }, 10));
+  const e = h.enemy('enemy_1019_jshoot'), A = h.b.snapshot();
+  const until = A.stand.find((s) => s[0] === e.id)[1];
+  h.step();
+  const cutAt = Math.round(h.b.time * 1000) / 1000;
+  assert.ok(h.b.displace(e, { x: -1, y: 0 }, 0.6) > 0);
+  h.step(2);
+  const B = h.b.snapshot();
+  assert.ok(until > A.t && until < B.t);
+  assert.equal(B.standCut.find((s) => s[0] === e.id)[1], cutAt);
+  const b = new SnapshotBuffer();
+  b.push(snapFrame('test', A), 0);
+  b.push(snapFrame('test', B), 0.05);
+  const a = A.units.find((u) => u[0] === e.id), z = B.units.find((u) => u[0] === e.id);
+  near(b.sample((A.t + B.t) / 2).get(e.id).x, (a[1] + z[1]) / 2);
+  near(b.sample(B.t + 1e-6).get(e.id).vx, (z[1] - a[1]) / (B.t - A.t));
+  checkInvariants(h.b);
+  assert.equal(h.b.errors.length, 0);
+});
+
+test('真实隐形弩手：恐惧打断在延迟帧之后仍恢复线性插值', () => {
+  const h = arena('enemy_1019_jshoot');
+  assert.ok(h.runUntil(() => {
+    const e = h.enemy('enemy_1019_jshoot');
+    return e && e.atkStandUntil - h.b.time > 4 * TICK && e.atkStandUntil - h.b.time < 5 * TICK;
+  }, 10));
+  const e = h.enemy('enemy_1019_jshoot'), A = h.b.snapshot();
+  const until = A.stand.find((s) => s[0] === e.id)[1];
+  h.step();
+  assert.equal(h.b.applyStatus(e, 'fear', { duration: 1, source: h.unit('t_wall') }), true);
+  // 本地 runner 在卡帧时会推进多个 tick 后再发出一帧。
+  h.step(5);
+  const B = h.b.snapshot();
+  assert.ok(e.s.flags.fear && until > A.t && until < B.t);
+  assert.ok(B.standCut.some((s) => s[0] === e.id && s[1] >= A.t));
+  const b = new SnapshotBuffer();
+  b.push(snapFrame('test', A), 0);
+  b.push(snapFrame('test', B), (B.t - A.t) / 2);
+  const a = A.units.find((u) => u[0] === e.id), z = B.units.find((u) => u[0] === e.id);
+  const s = b.sample((A.t + until) / 2).get(e.id);
+  const alpha = (until - A.t) / (2 * (B.t - A.t));
+  near(s.x, a[1] + (z[1] - a[1]) * alpha);
+  assert.ok(s.x > a[1]);
   checkInvariants(h.b);
   assert.equal(h.b.errors.length, 0);
 });
