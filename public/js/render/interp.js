@@ -20,7 +20,7 @@
 //     game s behind) are dropped by the caller's choice (`isCosmeticEvent`); state events — an enemy's form fx
 //     included — are always delivered, and a full queue sheds only cosmetic ones.
 //
-// Snapshot tuple layout (DESIGN §8.2): [id, x, y, hp, maxHp, sp, spMax, flags, anim]. Two optional lists ride along
+// Snapshot tuple layout (DESIGN §8.2): [id, x, y, hp, maxHp, sp, spMax, flags, anim]. Optional lists ride along
 // (server/sim/battle/events.js snapshot, user playtest #4 items 8 / 9):
 //   * `elem` [[id, element, fill, cooldownEnd, cooldown]] — the element gauge a unit shows: appended to that unit's
 //     normalised tuple (EL…EL_DUR) and handed out by sample() as `el`, `elFill`, `elUntil`, `elDur` (from the older
@@ -29,6 +29,7 @@
 //     longer in `units`) and the tile they lie on (where they fell, or their home — sim Battle._layBody; kept only when
 //     both are integers): downAt(time) returns the list of the snapshot at `time`.
 // Game times in both (`cooldownEnd`, `respawnAt`) are on the snapshots' clock, so a view compares them with renderT.
+// `stand` [[id, until]]：敌人普攻后摇结束的游戏时间。只调整位置插值，不从 anim 推断停步；旧快照仍线性插值。
 
 import { fxForm } from '../../../shared/protocol.js';
 import { ANIM } from '../../../shared/constants.js';
@@ -66,8 +67,9 @@ export function frameTime(msg) {
 
 /**
  * Validate & normalise a b.snap payload. Returns `{ t, units: Map<id, tuple>, down: [[id, respawnAt, respawnTime,
- * state, row?, col?]] | null, raw }` or null when unusable. Tuples with a non-finite id/x/y are skipped; other numbers default
+ * state, row?, col?]] | null, stand: Map<id, until> | null, raw }` or null when unusable. Tuples with a non-finite id/x/y are skipped; other numbers default
  * to 0; a unit's `elem` entry (see header) is appended to its tuple; malformed `elem` / `down` entries are dropped.
+ * `stand` 只保留快照中已有单位的有限、未来结束时间。
  */
 export function normalizeSnapshot(snap) {
   if (!snap || typeof snap !== 'object') return null;
@@ -99,7 +101,14 @@ export function normalizeSnapshot(snap) {
       (down || (down = [])).push(e);
     }
   }
-  return { t, units, down, raw: snap };
+  let stand = null;
+  if (Array.isArray(snap.stand)) {
+    for (const e of snap.stand) {
+      if (!Array.isArray(e) || !units.has(e[0]) || !Number.isFinite(e[1]) || e[1] <= t) continue;
+      (stand || (stand = new Map())).set(e[0], e[1]);
+    }
+  }
+  return { t, units, down, stand, raw: snap };
 }
 
 export class SnapshotBuffer {
@@ -288,17 +297,23 @@ export class SnapshotBuffer {
         const dx = b[1] - a[1], dy = b[2] - a[2];
         // (a deployment in between — the newer snapshot starts its deploy animation — lands on its tile, no slide)
         const tele = dx * dx + dy * dy > this.teleport * this.teleport || redeployed(a, b);
-        o.x = tele ? (alpha < 1 ? a[1] : b[1]) : a[1] + dx * alpha;
-        o.y = tele ? (alpha < 1 ? a[2] : b[2]) : a[2] + dy * alpha;
-        o.vx = !tele && span > 0 ? dx / span : 0;
-        o.vy = !tele && span > 0 ? dy / span : 0;
+        const until = A.stand?.get(id);
+        // 后摇在两帧之间结束：先停步，再插值实际移动部分。若新帧在结束前已经移动（如失衡打断），沿用线性插值。
+        const start = until > A.t && until <= B.t ? until : A.t;
+        const moveSpan = B.t - start;
+        const moveAlpha = moveSpan > 0 ? clamp((time - start) / moveSpan, 0, 1) : 0;
+        o.x = tele ? (alpha < 1 ? a[1] : b[1]) : a[1] + dx * moveAlpha;
+        o.y = tele ? (alpha < 1 ? a[2] : b[2]) : a[2] + dy * moveAlpha;
+        o.vx = !tele && moveSpan > 0 && (start === A.t || time >= start) ? dx / moveSpan : 0;
+        o.vy = !tele && moveSpan > 0 && (start === A.t || time >= start) ? dy / moveSpan : 0;
         o.hp = a[3] + (b[3] - a[3]) * alpha;
         o.maxHp = b[4] || a[4];
         o.sp = a[5] + (b[5] - a[5]) * alpha;
         o.spMax = b[6] || a[6];
       } else {
         let vx = 0, vy = 0;
-        if (P && ext > 0) {
+        // 最新帧仍有后摇时，旧速度不能预测恢复后的移动；即使时钟越过 until，也等下一帧确认位置。
+        if (P && ext > 0 && !A.stand?.has(id)) {
           const p = P.units.get(id);
           const dtp = A.t - P.t;
           if (p && dtp > 0) {

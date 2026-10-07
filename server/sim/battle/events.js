@@ -38,6 +38,7 @@ export class BattleEvents {
    *         game time their respawn timer ends, its length (s), constants.js DOWN_STATE and the tile they lie on (and
    *         come back on: _layBody — where they fell, or their home);
    *   elem: [[id, element, fill, cooldownEnd, cooldown]] — the element gauge each unit shows (damage.js elementView).
+   *   stand: [[id, until]] — 敌人普攻后摇结束的游戏时间，读取现有 atkStandUntil，不改变战斗状态。
    */
   snapshot() {
     const snap = {
@@ -60,13 +61,18 @@ export class BattleEvents {
       (down || (down = [])).push([u.id, r2(u.respawnAt), r2(Math.max(0, u.respawnAt - u.deathAt)), this._downState(u), ...this.restTile(u)]);
     }
     if (down) snap.down = down;
-    let elem = null;
+    let elem = null, stand = null;
     for (const u of this.units) {
       if (!u.alive || !u.deployed || u.hidden) continue;
+      const until = Math.round(u.atkStandUntil * 1000) / 1000;
+      if (u.side === 'enemy' && !u.s.flags.fear && !u.s.flags.stun && Number.isFinite(until) && until > snap.t) {
+        (stand || (stand = [])).push([u.id, until]);
+      }
       const v = elementView(u, this.time);
       if (v) (elem || (elem = [])).push([u.id, v[0], v[1], v[2], v[3]]);
     }
     if (elem) snap.elem = elem;
+    if (stand) snap.stand = stand;
     return snap;
   }
 

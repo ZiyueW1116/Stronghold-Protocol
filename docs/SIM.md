@@ -1292,7 +1292,7 @@ Unknown subprofessions fall back to the profession default (test `professions.te
 
 ## 9. Wire format (snapshot.js, DESIGN §8.2)
 
-- `snapshot()` → `{ fieldId, t, units: [[id, x, y, hp, maxHp, sp, spMax, flags, anim]], dp, killed, total, dps?, boss?, down?, elem? }`.
+- `snapshot()` → `{ fieldId, t, units: [[id, x, y, hp, maxHp, sp, spMax, flags, anim]], dp, killed, total, dps?, boss?, down?, elem?, stand? }`.
   `sp/spMax` show remaining duration/ammo as a draining bar while a timed skill is active (ammo: `ammoLeft / ammoMax`, the
   activation's real total — 拉特兰's and 逃犯引渡手续's extra bullets included, community report #35). Units in DIE state stay 0.8 s.
   Active finite zero-SP duration skills display `timeLeft/duration` using `duration` as `spMax`; after end they show
@@ -1305,6 +1305,11 @@ Unknown subprofessions fall back to the profession default (test `professions.te
   knocked-out operator's tile, §1; `row, col` = the tile it lies on and comes back on, `unit.body`); `elem: [[id, element, fill,
   cooldownEnd, cooldown]]` (only when non-empty) = `elementView` of every unit with a gauge or a running 爆发冷却 (§3).
   `fieldMeta()` lists the knocked-out operators too (a client joining mid-battle shows them; DESIGN §18.3).
+  `stand: [[id, until]]` 只在非空时发送，读取存活、已部署、可见且未恐惧或眩晕的敌人的 `atkStandUntil`。
+  `until` 是普攻后摇结束的游戏时间；这是显示元数据，不修改战斗状态。当结束时间落在相邻快照间时，
+  位置插值先保持原位，再插值剩余区间；HP/SP 插值不变。若结束前的新帧已移动，则沿用线性插值。
+  最新帧仍有后摇时不使用旧速度外推，等待下一帧确认位置。
+  无此字段的旧快照保持原有行为，瞬移和重新部署仍优先跳转，不从攻击动画推断后摇。
 - `drainEvents()` tuples: `['spawn', UnitInfo]` (first appearance), `['deploy', id]` (every (re)deploy and 【移动】 — the client plays the deploy and its interpolation snaps instead of sliding), `['atk', src, tgt, projKind]`
   (`none|arrow|bolt|bomb|lob|orb|drone|enemy|boomerang|droneBomb|chain|chainHeal`; a boomerang's way back has no event — the
   renderer flies it back to the thrower at `BOOMERANG_RETURN_SPEED`; an enemy's `profile.shot` may name another kind,
