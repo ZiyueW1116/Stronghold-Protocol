@@ -91,7 +91,9 @@
 /**
  * `snapshot()` (SIM §9). On the wire this object is the payload of `b.snap`,
  * and `t` is sent as `gt` because the frame's `t` is the message type (DESIGN §8.2).
- * `dp` is one number. `down` and `elem` are omitted when empty.
+ * `dp` is one number. `down`, `elem`, `stand` 和 `standCut` 在空时省略；
+ * `stand` 的第二项为敌人普攻后摇结束的游戏时间，`standCut` 为最近一次终止或忽略后摇的游戏时间，
+ * 包括仍在快照死亡动画窗口内的敌人。
  *
  * @typedef {Object} FieldSnapshot
  * @property {string} fieldId
@@ -104,6 +106,8 @@
  * @property {Object} [boss]
  * @property {DownSnap[]} [down]
  * @property {ElemSnap[]} [elem]
+ * @property {[number, number][]} [stand]
+ * @property {[number, number][]} [standCut]
  */
 
 /**
